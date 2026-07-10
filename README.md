@@ -1,4 +1,4 @@
-# SafeTransact — Idempotent Payment Processor
+# SafeTransact — Payment Processing System
 
 SafeTransact is a backend service that simulates exactly-once payment processing,
 the same reliability guarantee real-world payment gateways (Stripe, Razorpay, UPI)
