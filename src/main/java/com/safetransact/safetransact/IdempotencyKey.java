@@ -5,9 +5,7 @@ import lombok.Data;
 import java.time.Instant;
 
 @Entity
-@Table(name = "idempotency_keys", uniqueConstraints = {
-        @UniqueConstraint(columnNames = "idempotencyKey")
-})
+@Table(name = "idempotency_keys")
 @Data
 public class IdempotencyKey {
 
@@ -15,11 +13,13 @@ public class IdempotencyKey {
     @GeneratedValue(strategy = GenerationType.UUID)
     private String id;
 
+    @Column(unique = true, nullable = false)
     private String idempotencyKey;
 
-    private String responsePayload; // stores the cached response as JSON string
+    @Enumerated(EnumType.STRING)
+    private IdempotencyStatus status;
 
-    private String status; // PROCESSING, COMPLETED
+    private String responsePayload;
 
     private Instant createdAt;
 }

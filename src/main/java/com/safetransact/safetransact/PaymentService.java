@@ -5,6 +5,7 @@ import org.springframework.dao.DataIntegrityViolationException;
 import org.springframework.stereotype.Service;
 import org.springframework.transaction.annotation.Transactional;
 
+import java.math.BigDecimal;
 import java.time.Instant;
 import java.util.Optional;
 
@@ -17,47 +18,75 @@ public class PaymentService {
     @Autowired
     private IdempotencyKeyRepository idempotencyKeyRepository;
 
+    @Autowired
+    private UserRepository userRepository;
+
     @Transactional
     public Payment processPayment(String idempotencyKey, Payment newPaymentRequest) {
 
-        // Step 1: Check if this idempotency key already exists
         Optional<IdempotencyKey> existingKey = idempotencyKeyRepository.findByIdempotencyKey(idempotencyKey);
 
         if (existingKey.isPresent()) {
-            // Duplicate request — same key already processed or being processed.
-            // In a full implementation, we'd parse responsePayload and return the cached Payment.
-            // For now, we fetch the actual payment using the same idempotency key.
-            return paymentRepository.findAll()
-                    .stream()
-                    .filter(p -> idempotencyKey.equals(p.getIdempotencyKey()))
-                    .findFirst()
-                    .orElseThrow(() -> new RuntimeException("Idempotency key exists but payment not found"));
+            IdempotencyKey key = existingKey.get();
+
+            if (key.getStatus() == IdempotencyStatus.PROCESSING) {
+                throw new RequestInProgressException(
+                        "A request with this idempotency key is still being processed: " + idempotencyKey);
+            }
+
+            return paymentRepository.findByIdempotencyKey(idempotencyKey)
+                    .orElseThrow(() -> new DuplicateRequestException(
+                            "Idempotency key marked COMPLETED but payment record missing: " + idempotencyKey));
         }
 
-        // Step 2: Try to insert a new idempotency key record FIRST.
-        // The unique constraint on idempotencyKey protects us here:
-        // if two threads race to insert the same key, only one will succeed.
         IdempotencyKey keyRecord = new IdempotencyKey();
         keyRecord.setIdempotencyKey(idempotencyKey);
-        keyRecord.setStatus("PROCESSING");
+        keyRecord.setStatus(IdempotencyStatus.PROCESSING);
         keyRecord.setCreatedAt(Instant.now());
 
         try {
             idempotencyKeyRepository.save(keyRecord);
         } catch (DataIntegrityViolationException e) {
-            // Another concurrent request already inserted this key first.
-            throw new RuntimeException("Duplicate request detected (race condition caught) for key: " + idempotencyKey);
+            throw new DuplicateRequestException("Duplicate request detected (race condition caught) for key: " + idempotencyKey);
         }
 
-        // Step 3: Now safely process the actual payment.
+        // ---- Money transfer logic starts here ----
+
+        BigDecimal amount = newPaymentRequest.getAmount();
+
+        User sender = userRepository.findByEmail(newPaymentRequest.getPayerAccount())
+                .orElseThrow(() -> new UserNotFoundException("Payer not found: " + newPaymentRequest.getPayerAccount()));
+
+        User receiver = userRepository.findByEmail(newPaymentRequest.getPayeeAccount())
+                .orElseThrow(() -> new UserNotFoundException("Payee not found: " + newPaymentRequest.getPayeeAccount()));
+
+        if (sender.getBalance().compareTo(amount) < 0) {
+            newPaymentRequest.setIdempotencyKey(idempotencyKey);
+            newPaymentRequest.setStatus(PaymentStatus.FAILED);
+            newPaymentRequest.setCreatedAt(Instant.now());
+            paymentRepository.save(newPaymentRequest);
+
+            keyRecord.setStatus(IdempotencyStatus.COMPLETED);
+            idempotencyKeyRepository.save(keyRecord);
+
+            throw new InsufficientBalanceException("Sender has insufficient balance: " + sender.getEmail());
+        }
+
+        sender.setBalance(sender.getBalance().subtract(amount));
+        receiver.setBalance(receiver.getBalance().add(amount));
+
+        userRepository.save(sender);
+        userRepository.save(receiver);
+
+        // ---- Money transfer logic ends here ----
+
         newPaymentRequest.setIdempotencyKey(idempotencyKey);
-        newPaymentRequest.setStatus("SUCCESS");
+        newPaymentRequest.setStatus(PaymentStatus.SUCCESS);
         newPaymentRequest.setCreatedAt(Instant.now());
 
         Payment savedPayment = paymentRepository.save(newPaymentRequest);
 
-        // Step 4: Mark idempotency key as completed
-        keyRecord.setStatus("COMPLETED");
+        keyRecord.setStatus(IdempotencyStatus.COMPLETED);
         idempotencyKeyRepository.save(keyRecord);
 
         return savedPayment;

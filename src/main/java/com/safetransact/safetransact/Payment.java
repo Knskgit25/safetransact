@@ -14,13 +14,15 @@ public class Payment {
     @GeneratedValue(strategy = GenerationType.UUID)
     private String id;
 
+    @Column(unique = true, nullable = false)
     private String idempotencyKey;
 
     private BigDecimal amount;
 
     private String currency;
 
-    private String status; // PENDING, SUCCESS, FAILED
+    @Enumerated(EnumType.STRING)
+    private PaymentStatus status;
 
     private String payerAccount;
 
@@ -29,5 +31,5 @@ public class Payment {
     private Instant createdAt;
 
     @Version
-    private Long version; // this is the optimistic locking field
+    private Long version;
 }
