@@ -21,5 +21,10 @@ public class IdempotencyKey {
 
     private String responsePayload;
 
+    private String requestHash;
+
+    public String getRequestHash() { return requestHash; }
+    public void setRequestHash(String requestHash) { this.requestHash = requestHash; }
+
     private Instant createdAt;
 }

@@ -6,6 +6,7 @@ import org.springframework.stereotype.Service;
 import org.springframework.transaction.annotation.Transactional;
 
 import java.math.BigDecimal;
+import java.security.MessageDigest;
 import java.time.Instant;
 import java.util.Optional;
 
@@ -24,10 +25,18 @@ public class PaymentService {
     @Transactional
     public Payment processPayment(String idempotencyKey, Payment newPaymentRequest) {
 
+        String incomingHash = generateRequestHash(newPaymentRequest);
+
         Optional<IdempotencyKey> existingKey = idempotencyKeyRepository.findByIdempotencyKey(idempotencyKey);
 
         if (existingKey.isPresent()) {
             IdempotencyKey key = existingKey.get();
+
+            // Payload mismatch check — same key, different request data
+            if (!key.getRequestHash().equals(incomingHash)) {
+                throw new DuplicateRequestException(
+                        "Idempotency key already used with a different request payload: " + idempotencyKey);
+            }
 
             if (key.getStatus() == IdempotencyStatus.PROCESSING) {
                 throw new RequestInProgressException(
@@ -41,6 +50,7 @@ public class PaymentService {
 
         IdempotencyKey keyRecord = new IdempotencyKey();
         keyRecord.setIdempotencyKey(idempotencyKey);
+        keyRecord.setRequestHash(incomingHash);
         keyRecord.setStatus(IdempotencyStatus.PROCESSING);
         keyRecord.setCreatedAt(Instant.now());
 
@@ -49,8 +59,6 @@ public class PaymentService {
         } catch (DataIntegrityViolationException e) {
             throw new DuplicateRequestException("Duplicate request detected (race condition caught) for key: " + idempotencyKey);
         }
-
-        // ---- Money transfer logic starts here ----
 
         BigDecimal amount = newPaymentRequest.getAmount();
 
@@ -78,8 +86,6 @@ public class PaymentService {
         userRepository.save(sender);
         userRepository.save(receiver);
 
-        // ---- Money transfer logic ends here ----
-
         newPaymentRequest.setIdempotencyKey(idempotencyKey);
         newPaymentRequest.setStatus(PaymentStatus.SUCCESS);
         newPaymentRequest.setCreatedAt(Instant.now());
@@ -90,5 +96,21 @@ public class PaymentService {
         idempotencyKeyRepository.save(keyRecord);
 
         return savedPayment;
+    }
+
+    private String generateRequestHash(Payment payment) {
+        try {
+            String raw = payment.getAmount() + "|" + payment.getCurrency() + "|"
+                    + payment.getPayerAccount() + "|" + payment.getPayeeAccount();
+            MessageDigest digest = MessageDigest.getInstance("SHA-256");
+            byte[] hashBytes = digest.digest(raw.getBytes());
+            StringBuilder sb = new StringBuilder();
+            for (byte b : hashBytes) {
+                sb.append(String.format("%02x", b));
+            }
+            return sb.toString();
+        } catch (Exception e) {
+            throw new RuntimeException("Failed to generate request hash", e);
+        }
     }
 }
