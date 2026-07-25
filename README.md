@@ -1,77 +1,127 @@
-# SafeTransact — Payment Processing System
+# SafeTransact
 
-SafeTransact is a backend service that simulates exactly-once payment processing,
-the same reliability guarantee real-world payment gateways (Stripe, Razorpay, UPI)
-rely on to prevent users from being charged twice due to network retries, duplicate
-clicks, or concurrent requests.
+A production-style idempotent payment processing engine built with Spring Boot, designed to guarantee **exactly-once payment execution** under concurrent duplicate requests.
 
-## The Problem
+## Problem It Solves
 
-In distributed systems, a client may retry a payment request if it doesn't receive
-a response in time — even if the original request actually succeeded on the server.
-Without protection, this naive retry can result in the same payment being processed
-twice. SafeTransact solves this using the **idempotency key pattern**, combined with
-database-level concurrency controls to guarantee correctness even under race conditions.
+Payment APIs are frequently called twice — a client retries after a timeout, a mobile app double-taps "Pay", or a load balancer replays a request. Without protection, this can cause **duplicate money transfers**. SafeTransact solves this using the **Idempotency-Key pattern**, combined with database-level race protection and payload-integrity checks.
 
-## How It Works
+## Key Features
 
-**1. Idempotency Keys**
-Every payment request must include a unique `Idempotency-Key` header. Before processing
-any payment, the system checks whether this key has been seen before:
-- If yes, the existing payment result is returned — no duplicate processing occurs.
-- If no, a new idempotency key record is inserted, and the payment is processed.
-
-**2. Database-Level Race Condition Protection**
-A unique constraint on the idempotency key column ensures that even if two requests
-with the same key arrive at the exact same moment (e.g. a double-click or a network
-retry firing concurrently), only one insert can succeed. The database itself rejects
-the second insert with a `DataIntegrityViolationException`, which the service layer
-catches and handles gracefully — preventing duplicate payments without relying on
-application-level locks alone.
-
-**3. Optimistic Locking**
-Each `Payment` record has a `@Version` field. Whenever a payment is updated, this
-version number increments. If two concurrent operations try to update the same
-payment, Spring Data JPA detects the version mismatch and rejects the stale update,
-preventing lost updates — a classic race condition in concurrent systems.
+- **Exactly-once payment processing** — the same `Idempotency-Key` always returns the same result, even under 50+ concurrent duplicate requests
+- **Atomic balance transfer** — sender debit and receiver credit happen inside a single `@Transactional` boundary
+- **Race-condition safe** — a unique DB constraint on the idempotency key catches simultaneous duplicate requests that arrive within milliseconds of each other, before any business logic runs
+- **Payload-integrity validation** — if the same idempotency key is reused with a *different* payment payload (e.g. a different amount), the request is rejected instead of silently processed
+- **Insufficient balance handling** — failed payments are recorded (not silently dropped), with no partial fund deduction
+- **Clean DTO boundary** — request/response DTOs with Jakarta Bean Validation (`@NotNull`, `@Positive`, `@Email`, etc.); controllers never expose raw JPA entities
 
 ## Tech Stack
 
-- Java 17
-- Spring Boot 3 (Web, Data JPA)
-- H2 Database (in-memory, for fast local development)
-- Lombok
+| Layer | Technology |
+|---|---|
+| Language | Java 21 |
+| Framework | Spring Boot |
+| Persistence | Spring Data JPA + H2 (dev) |
+| Validation | Jakarta Bean Validation |
+| Testing | JUnit 5, `ExecutorService` + `CountDownLatch` for concurrency simulation |
+| Build | Maven |
 
-## API
+> Docker and Redis were deliberately scoped out for this project — the focus is on correctness of the core payment engine and concurrency guarantees rather than infrastructure, to keep the scope tight and resume-relevant.
 
-**POST** `/api/payments`
+## Architecture
 
-Headers:
+```
+Client
+  │
+  ▼
+Controller (validates DTO, maps to entity)
+  │
+  ▼
+Service (business logic, @Transactional)
+  │
+  ├── IdempotencyKeyRepository (unique constraint on key)
+  ├── PaymentRepository
+  └── UserRepository
+  │
+  ▼
+Database (H2)
+```
 
-Body:
-```json
+Payment flow uses a **Controller → Service → Repository** layering. User flow is intentionally simpler (**Controller → Repository**) since user creation has no business logic beyond validation.
+
+## How Idempotency Is Enforced
+
+1. **Request hash** — every payment request is hashed (SHA-256 over amount, currency, payer, payee). The amount is normalized (`stripTrailingZeros().toPlainString()`) before hashing, so `500` and `500.00` are treated as identical — preventing false "payload mismatch" errors from formatting differences alone.
+2. **Key reuse, same payload** → returns the original result (true idempotency).
+3. **Key reuse, different payload** → rejected with a clear error (protects against key misuse).
+4. **Simultaneous duplicate requests** (race condition) → a unique DB constraint on the idempotency key means only one request can insert the key record; every other concurrent request fails fast on `DataIntegrityViolationException` instead of both proceeding to debit the sender.
+
+## Tested Guarantees
+
+A concurrency test fires **50 simultaneous requests** with the same idempotency key at the payment endpoint:
+
+- **1** request succeeds and creates a payment record
+- **49** are rejected
+- Sender balance is debited **exactly once** — verified against the expected post-transfer balance
+
+Additional unit tests confirm the request-hash function treats equivalent amounts (`500` vs `500.00`) identically, while genuinely different amounts (`500` vs `999`) produce different hashes — so idempotency-key reuse detection is both accurate and scale-safe.
+
+## API Endpoints
+
+### Create User
+```
+POST /api/users
+Content-Type: application/json
+
 {
-  "amount": 500.00,
-  "currency": "INR",
-  "payerAccount": "acc123",
-  "payeeAccount": "acc456"
+  "name": "Alice",
+  "email": "alice@example.com",
+  "balance": 1000.00
 }
 ```
 
-Sending the same request twice with the same `Idempotency-Key` returns the same
-payment record both times — no duplicate is created.
+### Get User
+```
+GET /api/users/{id}
+```
+
+### Create Payment
+```
+POST /api/payments
+Content-Type: application/json
+Idempotency-Key: <unique-client-generated-key>
+
+{
+  "amount": 500.00,
+  "currency": "INR",
+  "payerAccount": "alice@example.com",
+  "payeeAccount": "bob@example.com"
+}
+```
+
+Returns `201 Created` with the payment record. Reusing the same `Idempotency-Key` with the same payload returns the same payment (no duplicate transfer). Reusing it with a different payload returns an error.
 
 ## Running Locally
 
 ```bash
-./mvnw spring-boot:run
+git clone https://github.com/Knskgit25/safetransact.git
+cd safetransact
+mvn spring-boot:run
 ```
 
-The application starts on `http://localhost:8080`.
+The app starts on `http://localhost:8080` with an in-memory H2 database (data resets on restart).
+
+## Running Tests
+
+```bash
+mvn test
+```
+
+Includes the concurrency test (50 parallel duplicate requests) and payload-hash unit tests.
 
 ## What This Project Demonstrates
 
-This project was built to explore core backend reliability concepts that are
-critical in payment systems: idempotency, optimistic concurrency control, and
-database-level constraint enforcement as a defense against race conditions —
-concepts that go beyond basic CRUD APIs.
+- Designing for **idempotency** in distributed/retry-prone systems
+- Handling **race conditions** at the database level, not just in application code
+- Writing **concurrency tests** that actually prove correctness under load, not just happy-path unit tests
+- Clean separation between API contracts (DTOs) and persistence models (entities)

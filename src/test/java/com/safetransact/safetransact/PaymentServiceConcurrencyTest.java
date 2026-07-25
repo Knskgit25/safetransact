@@ -93,4 +93,38 @@ public class PaymentServiceConcurrencyTest {
         assertEquals(0, new BigDecimal("900.00").compareTo(updatedSender.getBalance()),
                 "Balance sirf ek baar deduct hona chahiye, duplicate processing nahi");
     }
+
+    @Test
+    void sameAmountDifferentScale_shouldProduceSameHash() {
+        Payment p1 = new Payment();
+        p1.setAmount(new BigDecimal("500"));
+        p1.setCurrency("INR");
+        p1.setPayerAccount("acc123@test.com");
+        p1.setPayeeAccount("acc456@test.com");
+
+        Payment p2 = new Payment();
+        p2.setAmount(new BigDecimal("500.00"));
+        p2.setCurrency("INR");
+        p2.setPayerAccount("acc123@test.com");
+        p2.setPayeeAccount("acc456@test.com");
+
+        assertEquals(paymentService.generateRequestHash(p1), paymentService.generateRequestHash(p2));
+    }
+
+    @Test
+    void differentAmount_shouldProduceDifferentHash() {
+        Payment p1 = new Payment();
+        p1.setAmount(new BigDecimal("500"));
+        p1.setCurrency("INR");
+        p1.setPayerAccount("acc123@test.com");
+        p1.setPayeeAccount("acc456@test.com");
+
+        Payment p2 = new Payment();
+        p2.setAmount(new BigDecimal("999"));
+        p2.setCurrency("INR");
+        p2.setPayerAccount("acc123@test.com");
+        p2.setPayeeAccount("acc456@test.com");
+
+        assertNotEquals(paymentService.generateRequestHash(p1), paymentService.generateRequestHash(p2));
+    }
 }

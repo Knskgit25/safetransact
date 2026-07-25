@@ -98,9 +98,10 @@ public class PaymentService {
         return savedPayment;
     }
 
-    private String generateRequestHash(Payment payment) {
+    String generateRequestHash(Payment payment) {
         try {
-            String raw = payment.getAmount() + "|" + payment.getCurrency() + "|"
+            String raw = payment.getAmount().stripTrailingZeros().toPlainString() + "|"
+                    + payment.getCurrency() + "|"
                     + payment.getPayerAccount() + "|" + payment.getPayeeAccount();
             MessageDigest digest = MessageDigest.getInstance("SHA-256");
             byte[] hashBytes = digest.digest(raw.getBytes());
